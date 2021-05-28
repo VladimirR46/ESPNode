@@ -1,0 +1,114 @@
+#include <iostream>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <arpa/inet.h>
+#include <signal.h>
+
+#include "socketcan.h"
+#include "socketudp.h"
+
+static volatile int running = 1;
+
+int sock[INUMBER];
+int send_sock;
+struct sockaddr_in addr[INUMBER];
+struct pollfd poll_set[INUMBER];
+
+UDP_to_CAN CanInterfaces[INUMBER];
+
+using namespace std;
+
+void init_interfaces()
+{
+	/* Can Interfaces 0 */
+	strcpy(CanInterfaces[0].ifname, "vcan0");
+	CanInterfaces[0].receive_port = 3424;
+	CanInterfaces[0].send_port = 34252;
+	CanInterfaces[0].send_addr = inet_addr("127.0.0.1");
+
+	/* Can Interfaces 1 */
+	strcpy(CanInterfaces[1].ifname, "vcan1");
+	CanInterfaces[1].receive_port = 3426;
+	CanInterfaces[1].send_port = 3427;
+	CanInterfaces[1].send_addr = inet_addr("127.0.0.1");
+}
+
+int get_interfaces_index(char *name)
+{
+	for (int i = 0; i < INUMBER; i++)
+		if (strcmp(CanInterfaces[i].ifname, name) == 0)
+			return i;
+	return -1;
+}
+
+static void sigterm(int signo)
+{
+	running = 0;
+}
+
+int main(int argc, char **argv)
+{
+	signal(SIGTERM, sigterm);
+	signal(SIGHUP, sigterm);
+	signal(SIGINT, sigterm);
+
+	if (argc == 9)
+	{
+		strcpy(CanInterfaces[0].ifname, argv[1]);
+		CanInterfaces[0].receive_port = atoi(argv[2]);
+		CanInterfaces[0].send_port = atoi(argv[3]);
+		CanInterfaces[0].send_addr = inet_addr(argv[4]);
+
+		strcpy(CanInterfaces[1].ifname, argv[5]);
+		CanInterfaces[1].receive_port = atoi(argv[6]);
+		CanInterfaces[1].send_port = atoi(argv[7]);
+		CanInterfaces[1].send_addr = inet_addr(argv[8]);
+	}
+	else if (argc == 1)
+	{
+		init_interfaces();
+	}
+	else
+	{
+		printf("error: few arguments\n");
+		return 0;
+	}
+
+	printf("UDP_to_CAN starting\n");
+
+	socketudp_init();
+	int can_socket = socketcan_open();
+
+	uint16_t const udp_msg_size = 10; // ID + DATA
+	uint8_t udp_data[udp_msg_size];
+	uint8_t can_data[8];
+	int ifindex = -1;
+	my_can_frame frame;
+
+	while (running)
+	{
+
+		if (socketudp_read(udp_data, udp_msg_size, ifindex) > 0)
+		{
+			uint16_t can_id = (udp_data[1] << 8) | udp_data[0];
+			memcpy(can_data, udp_data + 2, udp_msg_size - 2);
+			socketcan_write(can_socket, CanInterfaces[ifindex].ifname, can_id, can_data);
+		}
+
+		if (socketcan_read(can_socket, &frame) > 0)
+		{
+			udp_data[0] = uint8_t((frame.id & 0xFF00) >> 8);
+			udp_data[1] = uint8_t(frame.id & 0x00FF);
+			memcpy(udp_data + 2, frame.data, frame.dlc);
+
+			int ifid = get_interfaces_index(frame.ifname);
+			socketudp_write(udp_data, udp_msg_size, ifid);
+		}
+	}
+
+	socketudp_close();
+	socketcan_close(can_socket);
+
+	return 1;
+}
